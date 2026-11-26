@@ -28,3 +28,11 @@ class ScheduleRequest(RunRequest):
     recipient: str = Field(min_length=1, max_length=100)
     first_at: datetime
     repeat_daily: bool = False
+
+class CalibrationRequest(Request):
+    device_id: str = Field(min_length=1, max_length=80)
+    device_time: str = Field(min_length=1, max_length=40)
+    standard_time: str = Field(min_length=1, max_length=40)
+
+class RecomputeRequest(Request):
+    dataset_id: int = Field(gt=0)

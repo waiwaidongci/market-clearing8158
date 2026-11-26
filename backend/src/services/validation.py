@@ -1,7 +1,7 @@
 import csv
 import io
 import math
-from datetime import date
+from datetime import date, datetime
 from src.domain import analysis
 from src.domain.spec import SPEC
 
@@ -26,6 +26,11 @@ def cell(field, raw):
                 raise ValueError
         elif kind == 'date':
             value = date.fromisoformat(str(value)).isoformat()
+        elif kind == 'datetime':
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                raise ValueError
+            value = parsed.isoformat(timespec='seconds')
         elif kind == 'bool':
             values = {'true': True, 'false': False, '1': True, '0': False, '是': True, '否': False}
             value = values[str(value).lower()]

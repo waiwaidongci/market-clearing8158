@@ -71,6 +71,14 @@ def review(run_id: int, body: ReviewRequest, db: Session = Depends(connection),
         raise ValueError('请选择通过或退回')
     if body.review == Review.ACCEPTED and not body.decision:
         raise ValueError('通过复核时请填写处置决定')
+    if body.review == Review.ACCEPTED:
+        pending = (item.result or {}).get('pending', {})
+        if pending.get('on_day'):
+            raise ValueError(f"尚有 {pending['on_day']} 笔食堂核销挂起（跨日或缺校时依据），不能确认入账")
+        gate_rows = next((table['rows'] for table in (item.result or {}).get('tables', [])
+                          if table.get('title') == '结算检查'), [])
+        if any(row.get('status') == '阻断' and row.get('check') != '结算放行' for row in gate_rows):
+            raise ValueError('结算检查存在阻断项，请订正并补全校时后重跑再复核')
     modes = SPEC.get('modes')
     if modes and body.decision and body.decision not in modes:
         raise ValueError('请选择项目支持的处置决定')

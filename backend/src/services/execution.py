@@ -5,6 +5,7 @@ from src.config.database import Session
 from src.constants.enums import Status
 from src.domain.analysis import analyze
 from src.domain.spec import SPEC
+from src.models.clock import ClockCalibration
 from src.models.jobs import Delivery, Run, Schedule
 from src.models.source import Dataset
 from src.services.audit import record
@@ -58,14 +59,20 @@ def claim():
         job.attempt += 1
         job.lease_until = stamp + timedelta(minutes=3)
         records = db.get(Dataset, job.dataset_id).rows
-        return job.id, job.attempt, records, job.params
+        calibrations = [
+            {"device_id": row.device_id, "device_time": row.device_time,
+             "standard_time": row.standard_time}
+            for row in db.scalars(select(ClockCalibration).order_by(ClockCalibration.device_id,
+                                                                     ClockCalibration.device_time))
+        ]
+        return job.id, job.attempt, records, calibrations, job.params
 
 
 def execute(lease):
-    job_id, attempt, rows, params = lease
+    job_id, attempt, rows, calibrations, params = lease
     result = export = failure = None
     try:
-        result = analyze(rows, params)
+        result = analyze(rows, params, calibrations)
         export = write_report(job_id, attempt, result)
     except ValueError as error:
         failure = str(error)[:500]

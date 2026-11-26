@@ -13,7 +13,7 @@ export async function overview() {
   return el('div', {class:'overview'},
     el('div', {class:'overview-main'},
       el('section', {class:'hero'}, p(spec.organization,'eyeline'), h(2,spec.subtitle), p(spec.workflow,'intro-copy'),
-        el('div',{class:'actions'}, link(spec.pages[1], '#inputs', {class:'primary'}), link(spec.pages[2], '#run',{class:'quiet'}))),
+        el('div',{class:'actions'}, link(spec.pages[1], '#inputs', {class:'primary'}), link(spec.pages[3], '#run',{class:'quiet'}))),
       panel('业务处理步骤', el('ol', {class:'work-steps'}, spec.steps.map(text => el('li', {}, text)))),
       feed.length && panel('最近审计事件',table([
         {key:'actor',label:'操作者'}, {key:'event',label:'动作'}, {key:'target',label:'关联记录'},
@@ -22,6 +22,8 @@ export async function overview() {
     el('aside', {class:'sidebar-panel'},
       panel('当前批次', metrics([{label:'数据批次',value:datasets.length},{label:'运行记录',value:runs.length}]),
         datasets[0] && p(datasets[0].filename,'filename')),
+      panel('时钟校正', link('登记校时并查看挂起台账', '#clock', {class:'primary'}),
+        p('离线收银机凌晨核销按设备时间记账，用前后两次校时夹出真实营业日；跨日或缺依据先挂起。','subtle')),
       panel('最近运行', latest ? el('div',{class:'activity'},link(latest.name,`#results/${latest.id}`),
         pill(STATUS[latest.status],latest.status),p(date(latest.created_at),'subtle'))
         : empty('进入运行页，使用演示数据执行首次分析。','#run','前往运行')),

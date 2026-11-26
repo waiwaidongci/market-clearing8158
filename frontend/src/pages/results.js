@@ -11,7 +11,7 @@ import {date, value} from '../utils/format.js';
 export async function results(route, refresh) {
   const {spec,runs,datasets} = workspace;
   const id = route.id || runs[0]?.id;
-  if (!id) return panel(spec.pages[3],empty('还没有可查看的运行结果。','#run','前往运行'));
+  if (!id) return panel(spec.pages[4],empty('还没有可查看的运行结果。','#run','前往运行'));
   const job = await workspace.getRun(id);
   const source = datasets.find(item => item.id === job.dataset_id);
   const message = feedback();
@@ -31,11 +31,24 @@ export async function results(route, refresh) {
     el('select',{id:'run-picker',onChange:event=>{location.hash=`#results/${event.target.value}`;}},
       (runs.some(item=>item.id===job.id) ? runs : [job,...runs]).map(item=>el('option',{value:item.id,selected:item.id===job.id},item.name))));
   const result = job.result;
+  const pendingPanel = result?.pending?.items?.length ? panel('挂起流水 · 待定原因与归属依据',
+    p('以下食堂核销因跨日或缺校时依据未参与当日清分，补全校时并重算后再放行。', 'subtle'),
+    table([
+      {key:'transaction_key', label:'流水号'},
+      {key:'device_id', label:'设备编号'},
+      {key:'recorded_day', label:'设备记账日'},
+      {key:'pending_reason', label:'待定原因'},
+      {key:'range_start', label:'真实时间起'},
+      {key:'range_end', label:'真实时间止'},
+      {key:'basis', label:'归属依据'},
+    ], result.pending.items, {caption:'挂起流水', pageSize:8}),
+    link('前往时钟校正补录校时', '#clock', {class:'quiet'})) : null;
   const analysis = result ? el('section',{class:'analysis','data-testid':'analysis-complete'},
     el('div',{class:'result-head'},p(job.name,'eyeline'),h(2,result.headline),p(result.note,'intro-copy'),
       el('div',{class:'actions'},pill(STATUS[job.status],job.status),download,message)),
     metrics(result.metrics),
     result.charts.map(plot),
+    pendingPanel,
     (result.sections || []).map(item=>panel(item.title,p(item.text))),
     result.tables.map(item=>panel(item.title,table(item.columns,item.rows,{caption:item.title}))))
     : panel(job.name,pill(STATUS[job.status],job.status),p(job.error,'feedback'),link('返回调整参数',`#run/${job.dataset_id}`,{class:'quiet'}));

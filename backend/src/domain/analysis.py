@@ -1,9 +1,10 @@
 """Match the two ledgers by event key and reconcile each ledger's signed cents."""
 
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime
 import re
 
+from .clock import ATTRIBUTED, PENDING, attribute_all
 from .spec import CAMPUS, CANTEEN, MAX_CENTS, PARTIAL, REDEEM, REVERSE, SPEC
 
 
@@ -66,9 +67,39 @@ def _row(raw):
             row[key] = _day(value)
         elif key == "amount_cents":
             row[key] = _cents(value)
+        elif key in ("device_id", "device_time"):
+            row[key] = _device_field(field, value)
         else:
             row[key] = _text(field, value)
+    _check_device_fields(row)
     return row
+
+
+def _device_field(field, value):
+    if isinstance(value, str):
+        value = value.strip()
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > field.get("max_length", 300):
+        raise ValueError(f'{field["label"]}格式不正确')
+    return value
+
+
+def _check_device_fields(row):
+    """食堂核销账必须带设备编号与设备时间，校园卡账不得带设备字段。"""
+    if row["ledger"] == CANTEEN:
+        if not row.get("device_id"):
+            raise ValueError("食堂核销账须填写收银设备编号")
+        if not row.get("device_time"):
+            raise ValueError("食堂核销账须填写设备时间")
+        try:
+            parsed = datetime.fromisoformat(row["device_time"])
+        except ValueError:
+            raise ValueError("设备时间须为带时区偏移的 ISO-8601 时间（如 2026-11-20T23:55:00+08:00）") from None
+        if parsed.tzinfo is None:
+            raise ValueError("设备时间须带时区偏移（如 +08:00）")
+    elif row.get("device_id") or row.get("device_time"):
+        raise ValueError("校园卡账沿用卡中心日期，不填写设备编号或设备时间")
 
 
 def _validate_adjustments(ledger_rows):
@@ -182,14 +213,58 @@ def _table(title, columns, rows):
     return {"title": title, "columns": [{"key": key, "label": label} for key, label in columns], "rows": rows}
 
 
-def analyze(rows, normalized_params):
-    """Return the standard batch report for the selected posting date."""
+def _attribution_view(attributions):
+    columns = (
+        ("transaction_key", "流水号"), ("device_id", "设备编号"),
+        ("recorded_day", "设备记账日"), ("status", "归属状态"),
+        ("business_day", "营业日"), ("range_start", "真实时间起"),
+        ("range_end", "真实时间止"), ("basis", "归属依据/待定原因"),
+    )
+    rows = []
+    for attr in attributions:
+        if attr["ledger"] != CANTEEN:
+            continue
+        rows.append({
+            "transaction_key": attr["transaction_key"], "device_id": attr.get("device_id"),
+            "recorded_day": attr.get("recorded_day"), "status": attr["status"],
+            "business_day": attr.get("business_day") if attr["status"] == ATTRIBUTED else None,
+            "range_start": attr.get("range_start"), "range_end": attr.get("range_end"),
+            "basis": attr.get("basis"),
+        })
+    rows.sort(key=lambda item: (item["status"] != PENDING, item["transaction_key"]))
+    return _table("食堂核销营业日归属", columns, rows)
+
+
+def analyze(rows, normalized_params, calibrations=None):
+    """返回指定营业日的标准清分报告。
+
+    校园卡账按入账日选取；食堂核销账先经时钟漂移校正得到营业日，已归属的参与当日
+    双账清分，跨日或缺校时依据的挂起流水单列、不参与清分，并阻断结算放行。
+    """
     if not isinstance(normalized_params, dict) or normalized_params.keys() - {"posting_date"}:
         raise ValueError("日终清分仅支持结算日参数")
+    calibrations = calibrations or []
     day = _day(normalized_params.get("posting_date", SPEC["params"][0]["default"]))
     validated = validate_rows(rows)
+    attributions, _ = attribute_all(validated, calibrations)
+    attribution_by_key = {
+        attr["transaction_key"]: attr for attr in attributions if attr["ledger"] == CANTEEN
+    }
+    pending_on_day = [attr for attr in attributions
+                      if attr["ledger"] == CANTEEN and attr["status"] == PENDING
+                      and attr.get("recorded_day") == day]
+
+    def business_day(row):
+        # 校园卡账沿用入账日；食堂核销账用校时夹出的营业日
+        if row["ledger"] != CANTEEN:
+            return row["posting_date"]
+        return attribution_by_key[row["transaction_key"]]["business_day"]
+
     posting_days = {(row["ledger"], row["transaction_key"]): row["posting_date"] for row in validated}
-    selected = [row for row in validated if row["posting_date"] == day]
+    selected = [row for row in validated
+                if business_day(row) == day and not (
+                    row["ledger"] == CANTEEN
+                    and attribution_by_key[row["transaction_key"]]["status"] == PENDING)]
     campus = {row["transaction_key"]: row for row in selected if row["ledger"] == CAMPUS}
     canteen = {row["transaction_key"]: row for row in selected if row["ledger"] == CANTEEN}
     drilldown = _drilldown(campus, canteen, posting_days)
@@ -206,10 +281,14 @@ def analyze(rows, normalized_params):
               "canteen_cents": canteen_cents, "delta_cents": campus_cents - canteen_cents}
     crossfoot = (all(sum(cell[key] for cell in cells) == value for key, value in totals.items())
                  and _margin_matches(cells, zones, "zone") and _margin_matches(cells, groups, "merchant_group"))
+    pending_total = sum(1 for attr in attributions
+                        if attr["ledger"] == CANTEEN and attr["status"] == PENDING)
     checks = (
         ("当日入账", bool(selected), f"当日共 {len(selected)} 行。"),
         ("双账齐全", missing == 0, f"{missing} 笔流水只出现在一侧。"),
         ("逐笔一致", differences == 0, f"{differences} 笔双边流水存在差异。"),
+        ("时钟归属", len(pending_on_day) == 0,
+         f"{len(pending_on_day)} 笔食堂核销跨日或缺校时依据，已挂起不参与当日清分。"),
         ("交叉勾稽", crossfoot, "核对校区小计、档口组小计及全账行数与净额。"),
     )
     ready = all(passed for _, passed, _ in checks)
@@ -219,27 +298,31 @@ def analyze(rows, normalized_params):
     check_rows.append({"check": "结算放行", "status": gate, "detail": "所有检查通过后可确认入账。"})
     guidance = "核对小计后可将清分报告交给财务入账。"
     if not ready:
-        guidance = "请按明细中的流水号追查缺失、差异或跨日补传，订正后沿用本结算日重跑。"
+        guidance = "请按明细中的流水号追查缺失、差异、挂起依据或跨日补传，订正并补全校时后沿用本结算日重跑。"
     if not selected:
-        guidance = "当前结算日没有入账流水，请核对日期及双账导出范围后重跑。"
+        guidance = "当前营业日没有可清分流水，请核对日期、双账导出范围及挂起台账后重跑。"
     entry_columns = (
         ("transaction_key", "流水号"), ("status", "核对状态"), ("reason", "追查字段或原因"),
         *((f"{prefix}_{key}", f"{name} · {label}")
           for prefix, name in (("campus", CAMPUS), ("canteen", CANTEEN)) for key, label in _COMPARE[:-1]),
         *_SUMMARY_COLUMNS[2:],
     )
+    pending_table = _attribution_view(attributions)
     return {
         "state": "ok" if ready else "warning",
-        "headline": f"{day} 结算检查{gate}，{counts[_MATCH]} 笔匹配、{missing} 笔单边缺失、{differences} 笔差异。",
-        "note": "按入账日匹配，冲正与退扣按负分记账。差额为校园券账减食堂核销账。",
+        "headline": f"{day} 结算检查{gate}，{counts[_MATCH]} 笔匹配、{missing} 笔单边缺失、{differences} 笔差异、{len(pending_on_day)} 笔挂起。",
+        "note": "校园卡账按入账日、食堂核销账按校时夹出的真实营业日匹配；挂起流水不计入当日清分，冲正与退扣按负分记账。差额为校园券账减食堂核销账。",
         "metrics": [
             {"label": "校园券账净额（分）", "value": campus_cents, "detail": f"{len(campus)} 行"},
-            {"label": "食堂核销账净额（分）", "value": canteen_cents, "detail": f"{len(canteen)} 行"},
+            {"label": "食堂核销账净额（分）", "value": canteen_cents, "detail": f"{len(canteen)} 行（已归属）"},
             {"label": "双账差额（分）", "value": totals["delta_cents"], "detail": "逐笔异常影响结算放行"},
+            {"label": "挂起食堂核销（笔）", "value": len(pending_on_day),
+             "detail": f"当日挂起；全量挂起 {pending_total} 笔，待补全校时"},
         ],
         "tables": [
             _table("结算检查", (("check", "检查项"), ("status", "结果"), ("detail", "说明")), check_rows),
             _table("流水核对明细", entry_columns, drilldown),
+            pending_table,
             _table("校区 × 档口组勾稽", (_ZONE, _GROUP) + _SUMMARY_COLUMNS, cells),
             _table("校区小计", (_ZONE,) + _SUMMARY_COLUMNS, zones),
             _table("档口组小计", (_GROUP,) + _SUMMARY_COLUMNS, groups),
@@ -248,4 +331,19 @@ def analyze(rows, normalized_params):
         "charts": [{"title": "流水核对状态", "kind": "bar",
                     "series": [{"label": status, "value": counts[status]} for status in _STATUSES]}],
         "sections": [{"title": "财务复核", "text": guidance}],
+        "pending": {
+            "total": pending_total,
+            "on_day": len(pending_on_day),
+            "items": [{"transaction_key": attr["transaction_key"], "device_id": attr.get("device_id"),
+                       "recorded_day": attr.get("recorded_day"), "pending_reason": attr["pending_reason"],
+                       "basis": attr.get("basis"), "range_start": attr.get("range_start"),
+                       "range_end": attr.get("range_end")}
+                      for attr in attributions if attr["ledger"] == CANTEEN and attr["status"] == PENDING],
+        },
+        "attributions": [
+            {"transaction_key": attr["transaction_key"], "status": attr["status"],
+             "business_day": attr.get("business_day"), "basis": attr.get("basis"),
+             "range_start": attr.get("range_start"), "range_end": attr.get("range_end")}
+            for attr in attributions if attr["ledger"] == CANTEEN
+        ],
     }

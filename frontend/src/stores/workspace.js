@@ -18,5 +18,10 @@ export const workspace = {
   deliveries: () => call('/deliveries'),
   schedule: data => call('/schedules', data),
   disable: id => call(`/schedules/${id}/disable`, {}),
+  calibrations: () => call('/clock/calibrations'),
+  pending: (datasetId, day) => call(`/clock/pending?${new URLSearchParams(
+    Object.entries({dataset_id:datasetId, day}).filter(([,v]) => v !== undefined && v !== null && v !== ''))}`),
+  registerCalibration: data => call('/clock/calibrations', data),
+  recompute: datasetId => call('/clock/recompute', {dataset_id:datasetId}),
   download: (path, filename) => saveFile(path, session.token, filename),
 };
